@@ -4,6 +4,9 @@ const http = require('http');
 const https = require('https');
 const net = require('net');
 const os = require('os');
+const fs = require('fs');
+const path = require('path');
+const { execFileSync } = require('child_process');
 
 const ctx = new Map();
 const addrs = collectAddr();
@@ -18,7 +21,7 @@ const cleanupTimer = setInterval(cleanupIdleState, 30 * 1000);
 if (cleanupTimer.unref) cleanupTimer.unref();
 
 // SUO5_SERVER_START
-const server = http.createServer((req, res) => {
+const server = https.createServer(loadTlsOptions(), (req, res) => {
     processRequest(req, res).catch(() => {
         if (!res.headersSent) res.writeHead(500);
         if (!res.writableEnded) res.end();
@@ -838,8 +841,51 @@ function delay(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+function loadTlsOptions() {
+    const certPath = process.env.SUO5_TLS_CERT;
+    const keyPath = process.env.SUO5_TLS_KEY;
+    if (certPath && keyPath) {
+        const options = { cert: fs.readFileSync(certPath), key: fs.readFileSync(keyPath) };
+        const passphrase = process.env.SUO5_TLS_PASSPHRASE;
+        if (passphrase) options.passphrase = passphrase;
+        return options;
+    }
+    if (certPath || keyPath) {
+        throw new Error('SUO5_TLS_CERT and SUO5_TLS_KEY must be provided together');
+    }
+    console.warn('[suo5] no TLS cert configured, generating a temporary self-signed certificate via openssl');
+    return generateSelfSignedCert();
+}
+
+function generateSelfSignedCert() {
+    const certFile = path.join(os.tmpdir(), `suo5-cert-${process.pid}.pem`);
+    const keyFile = path.join(os.tmpdir(), `suo5-key-${process.pid}.pem`);
+    try {
+        execFileSync('openssl', [
+            'req', '-x509', '-newkey', 'rsa:2048',
+            '-keyout', keyFile, '-out', certFile,
+            '-days', '365', '-nodes',
+            '-subj', '/CN=localhost'
+        ], { stdio: 'ignore' });
+        return {
+            cert: fs.readFileSync(certFile),
+            key: fs.readFileSync(keyFile)
+        };
+    } catch (_) {
+        throw new Error(
+            'Auto-generating a self-signed TLS certificate via openssl failed. ' +
+            'Install openssl, or set SUO5_TLS_CERT and SUO5_TLS_KEY env vars to ' +
+            'point to existing PEM cert/key files.'
+        );
+    } finally {
+        try { fs.unlinkSync(certFile); } catch (_) {}
+        try { fs.unlinkSync(keyFile); } catch (_) {}
+    }
+}
+
 // SUO5_LISTEN_START
-server.listen(8080, () => {
-    console.log('Node.js Suo5 Tunneling Server running on port 8080');
+const SUO5_PORT = parseInt(process.env.SUO5_PORT, 10) || 8080;
+server.listen(SUO5_PORT, () => {
+    console.log(`Node.js Suo5 HTTPS Tunneling Server running on port ${SUO5_PORT}`);
 });
 // SUO5_LISTEN_END
